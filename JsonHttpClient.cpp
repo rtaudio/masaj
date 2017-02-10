@@ -1,19 +1,25 @@
 #include <sstream>
+#include <functional>
+#include <cctype>
 
 #include "JsonHttpClient.h"
 
 #undef LOG
 #include "mongoose/mongoose.h"
 
+#include "SocketAddress.h"
+
+
 // need to override LOG() macro:
 #undef LOG
 #define LOG(level) if (level > pclog::Log::ReportingLevel()) ; else pclog::Log(level).get()
 #define logDebugHttp logDEBUG
+#include "pclog/pclog.h"
 
-
-JsonHttpClient::JsonHttpClient()
+JsonHttpClient::JsonHttpClient(int timeoutMs)
 {
-	m_connectTimeout = UP::HttpConnectTimeout;
+	m_timeoutConnectMs = timeoutMs;
+	m_timeoutResponseMs = timeoutMs;
 	m_rpcId = 1;
 }
 
@@ -36,40 +42,76 @@ const JsonNode &JsonHttpClient::rpc(const SocketAddress &host, const std::string
 
 	if (rpcResp["id"].num != m_rpcId) {
 		LOG(logDEBUG) << "response with invalid id: " << rpcResp;
-		throw Exception("RPC response id does not match request!");
+		throw std::runtime_error("RPC response id does not match request!");
 	}
 
 	if (rpcResp["result"].isUndefined()) {
-		throw Exception("RPC response without result!");
+		throw std::runtime_error("RPC response without result!");
 	}
 
 
 	if (!rpcResp["result"]["error"].str.empty())
-		throw JsonHttpClient::Exception(rpcResp["result"]["error"].str);
+		throw std::runtime_error(rpcResp["result"]["error"].str);
 
 	return rpcResp["result"];
 }
 
+#ifdef _WIN32
+LARGE_INTEGER timerFreq;
+VOID(WINAPI*myGetSystemTime)(LPFILETIME);
+#endif
+
+inline static uint64_t getMicroSeconds()
+{
+#ifndef _WIN32
+	uint64_t t;
+	struct timeval tv;
+	gettimeofday(&tv, 0);
+	t = (uint64_t)tv.tv_sec * (uint64_t)1e6 + (uint64_t)tv.tv_usec;
+	return t;
+#else
+	LARGE_INTEGER t1;
+	QueryPerformanceCounter(&t1);
+	return (uint64_t)(((double)t1.QuadPart) / ((double)timerFreq.QuadPart) * 1000000.0);
+#endif
+}
+
+// trim from start
+static inline std::string &ltrim(std::string &s) {
+	s.erase(s.begin(), std::find_if(s.begin(), s.end(), std::not1(std::ptr_fun<int, int>(std::isspace))));
+	return s;
+}
+
+// trim from end
+static inline std::string &rtrim(std::string &s) {
+	s.erase(std::find_if(s.rbegin(), s.rend(), std::not1(std::ptr_fun<int, int>(std::isspace))).base(), s.end());
+	return s;
+}
+
+// trim from both ends
+static inline std::string &trim(std::string &s) {
+	return ltrim(rtrim(s));
+}
 
 
 const JsonNode &JsonHttpClient::request(const SocketAddress &host, const std::string &method, const std::string &body)
 {
-	LOG(logDEBUG1) << "http request to " << host << " /" << method << " " << body;
-	auto tStart =  UP::getMicroSeconds();
+	//LOG(logDEBUG1) << "http request to " << host << " /" << method << " " << body;
+	auto tStart =  getMicroSeconds();
 
 	SOCKET soc = socket(host.getFamily(), SOCK_STREAM, IPPROTO_TCP);
 	try {
 		int res;
-		if (m_connectTimeout > 0) {
+		if (m_timeoutConnectMs > 0) {
 			if (!socketSetBlocking(soc, false))
-				throw Exception("Cannot set socket non-blocking!");
+				throw std::runtime_error("Cannot set socket non-blocking!");
 
 			res = connect(soc, (const sockaddr*)(&host), sizeof(host));
 			if (res != 0) {
-				res = socketConnectTimeout(soc, UP::HttpConnectTimeout * 1000);
+				res = socketConnectTimeout(soc, m_timeoutConnectMs * 1000);
 				if (res != 1) {
-					LOG(logDEBUG) << "connect() to " << host << " timed out";
-					throw Exception("Connect timeout (" + std::to_string(UP::HttpConnectTimeout) + " ms)!");
+					//LOG(logDEBUG) << "connect() to " << host << " timed out";
+					throw std::runtime_error("Connect timeout (" + std::to_string(m_timeoutConnectMs) + " ms) to " + host.toString());
 				}
 			}
 		}
@@ -78,8 +120,8 @@ const JsonNode &JsonHttpClient::request(const SocketAddress &host, const std::st
 		}
 
         if (res == -1) {
-             LOG(logDebugHttp) << "connect() to " << host << " failed!";
-            throw Exception("Connect failed!");
+             //LOG(logDebugHttp) << "connect() to " << host << " failed!";
+            throw std::runtime_error("Connect failed!");
         }
 
 		std::string path("/x-" + method);
@@ -99,9 +141,9 @@ const JsonNode &JsonHttpClient::request(const SocketAddress &host, const std::st
 		
 		int toms = 0;
 		// set socket back to blocking if necessary
-		if (UP::HttpResponseTimeoutMs > 0)
+		if (m_timeoutResponseMs > 0)
 		{
-			toms = UP::HttpResponseTimeoutMs + rand() % (UP::HttpResponseTimeoutMs);
+			toms = m_timeoutResponseMs + rand() % (m_timeoutResponseMs);
 			socketSetBlocking(soc, true);
 
 			// set timeout
@@ -115,7 +157,7 @@ const JsonNode &JsonHttpClient::request(const SocketAddress &host, const std::st
 #endif
 			if (setsockopt(soc, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv)) < 0) {
 				LOG(logERROR) << "set SO_RCVTIMEO fro " << soc << " failed: " << lastError();
-				throw Exception("Cannot set recvtimeo to " + std::to_string(toms) + "us! " + lastError()) ;
+				throw std::runtime_error("Cannot set recvtimeo to " + std::to_string(toms) + "us! " + lastError()) ;
 			}
 		}
 		
@@ -135,21 +177,21 @@ const JsonNode &JsonHttpClient::request(const SocketAddress &host, const std::st
 		}
 		close(soc);
 
-		auto tEnd = UP::getMicroSeconds();
+		auto tEnd = getMicroSeconds();
 
 		str = buf.str();
 		buf.str(""); buf.clear();
 		
 		if (str.empty())
 		{
-			throw Exception("Empty response!");
+			throw std::runtime_error("Empty response!");
 		}
 		
 		LOG(logDEBUG3) << "response after " << ((tEnd - tStart) / 1000) << " ms, timeout was " << toms << " ms";
 
 		auto skipHttpVer = str.find(' '), skipCode = str.find(' ', skipHttpVer + 1), skipStatus = str.find('\n', skipCode + 1);
 		if (skipHttpVer == std::string::npos || skipCode == std::string::npos || skipStatus == std::string::npos) {
-			throw Exception("Invalid HTTP response!");
+			throw std::runtime_error("Invalid HTTP response!");
 		}
 		auto code(std::stoi(str.substr(skipHttpVer + 1, skipCode - skipHttpVer)));
 		
@@ -157,7 +199,7 @@ const JsonNode &JsonHttpClient::request(const SocketAddress &host, const std::st
 		trim(status);
 
 		if (code != 200) {
-			throw Exception("HTTP error: " + status);
+			throw std::runtime_error("HTTP error: " + status);
 		}
 
 		bool winLb = str[skipStatus - 1] == '\r';
@@ -166,7 +208,7 @@ const JsonNode &JsonHttpClient::request(const SocketAddress &host, const std::st
 
 		if (!m_lastData.tryParse(body)) {
 			LOG(logERROR) << "Failed to parse json " << body;
-			throw Exception("JSON parse error!");
+			throw std::runtime_error("JSON parse error!");
 		}
 
 		LOG(logDebugHttp) << "http response " << code << " (" << status << ") body: " << m_lastData;
@@ -174,7 +216,7 @@ const JsonNode &JsonHttpClient::request(const SocketAddress &host, const std::st
 		return m_lastData;
 	}
 
-	catch (const Exception &ex) {
+	catch (const std::exception &ex) {
 		close(soc);
 		throw ex;
 	}

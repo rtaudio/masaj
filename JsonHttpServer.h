@@ -5,7 +5,6 @@
 
 #include<map>
 
-#include <rtt/rtt.h>
 
 //#include "concurrentqueue/blockingconcurrentqueue.h"
 #include "ThreadPool/ThreadPool.h"
@@ -13,6 +12,7 @@
 typedef std::map<std::string, std::string> StringMap;
 
 
+union SocketAddress;
 
 struct mg_mgr;
 struct mg_connection;
@@ -108,18 +108,13 @@ private:
 
 		std::string lastRequest;
 
-		void notifyDoneSync() {
-			//waitForPoll.Reset();
-			//waitForPoll.Wait();
-			done.Signal();
-		}
-
-		void notifyDoneNow() {
-			done.Signal();
+		void notifyDone() {
+			done.notify_all();
 		}
 
 		void blockUntilDone() {
-			done.Wait();
+			std::unique_lock<std::mutex> lock(mtx);
+			done.wait(lock);
 		}
 
 		void polled() {
@@ -129,7 +124,8 @@ private:
 		ConnectionHandler() : connectionClosed(false) {			
 		}
 	private:
-		RttEvent done;
+		std::condition_variable done;
+		std::mutex mtx;
 	};
 
 	//moodycamel::ConcurrentQueue<HandlerParamsAndPromise> dispatchQueue;

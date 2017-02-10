@@ -7,3 +7,6 @@
 [submodule "ThreadPool"]
 	path = ThreadPool
 	url = https://github.com/progschj/ThreadPool
+[submodule "pclog"]
+	path = pclog
+	url = https://github.com/rtaudio/pclog

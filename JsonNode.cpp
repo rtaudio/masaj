@@ -13,7 +13,7 @@
 
 #include "mongoose/mongoose.h"
 #ifdef ANDROID
-#include "ulltra-android/android-compat.h"
+#include "android-compat.h"
 #endif
 
 #include "frozen/frozen.h"

@@ -1,9 +1,10 @@
-#include "net.h"
-
 #include <string>
 #include <regex>
 #include <sstream>
 
+
+#include "net.h"
+#include "SocketAddress.h"
 
 #ifndef _WIN32
 #include <netinet/tcp.h>
@@ -24,7 +25,6 @@
 
 #include "frozen/frozen.h"
 
-#include <rtt.h>
 
 
 JsonHttpServer::JsonHttpServer(int numWorkerThreads)
@@ -396,7 +396,7 @@ void JsonHttpServer::ev_handler(struct mg_connection *nc, int ev, void *ev_data)
 						}
 						if(!ch->connectionClosed)
 							nc->flags |= MG_F_CLOSE_IMMEDIATELY; // stream connections always close
-						ch->notifyDoneSync();
+						ch->notifyDone();
 					});
 					return; // end handle streams
 				}
