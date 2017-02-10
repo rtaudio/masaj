@@ -1,0 +1,11 @@
+*.sln
+*.filters
+*.vcxproj
+*.log
+*.pdb
+*.obj
+*.cache
+*.tlog/
+*.lib
+CMakeFiles
+cmake_install.cmake

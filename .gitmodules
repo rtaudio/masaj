@@ -1,0 +1,9 @@
+[submodule "mongoose"]
+	path = mongoose
+	url = https://github.com/cesanta/mongoose
+[submodule "frozen"]
+	path = frozen
+	url = https://github.com/cesanta/frozen
+[submodule "ThreadPool"]
+	path = ThreadPool
+	url = https://github.com/progschj/ThreadPool
