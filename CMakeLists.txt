@@ -22,4 +22,4 @@ add_library(masaj ${src_masaj})
 
 target_include_directories (masaj PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
-target_link_libraries(masaj pclog mongoose ${MASAJ_LINKLIBS})
+target_link_libraries(masaj mongoose ${MASAJ_LINKLIBS})
