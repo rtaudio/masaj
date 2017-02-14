@@ -95,20 +95,20 @@ public:
 public:
         WsConnection(ConnectionHandler *ch) : ch(ch) { }
 
-        // TODO bug: segfault
+        // TODO bug: segfault, ch seems to be deleted
         inline bool write(std::vector<uint8_t> &&data) {
-            if(ch->connectionClosed) return false;
+            if(!isConnected()) return false;
             return ch->sendBuf->enqueue(data); }
 
         inline bool write(const std::vector<uint8_t> &data) {
-            if(ch->connectionClosed) return false;
+            if(!isConnected()) return false;
            return ch->sendBuf->enqueue(data); }
 
         int tryRead(uint8_t *buf, int maxLen) {
             return ch->recvBuf->try_dequeue_bulk(buf, maxLen);
         }
 
-        inline bool isConnected() const { return !ch->connectionClosed; }
+        inline bool isConnected() const { return !ch->connClosed; }
 
     private:
         ConnectionHandler *ch;
@@ -155,7 +155,8 @@ private:
 		ConnectionHandler(ConnectionHandler&&) noexcept {}
 		ConnectionHandler& operator=(ConnectionHandler&&) noexcept {}
 
-		std::atomic<bool> connectionClosed;
+		std::atomic<bool> taskEnded;
+		std::atomic<bool> connClosed;
 
         std::string lastRequest; // TODO remove
         std::string uri;
@@ -167,10 +168,12 @@ private:
 
 
 		void notifyDone() {
+			taskEnded = true;
 			done.notify_all();
 		}
 
 		void blockUntilDone() {
+			if (taskEnded) return;
 			std::unique_lock<std::mutex> lock(mtx);
 			done.wait(lock);
 		}
@@ -180,7 +183,7 @@ private:
         void update(struct mg_connection *nc, struct http_message *hm);
 
         ConnectionHandler() :
-            connectionClosed(false), sendBuf(nullptr), recvBuf(nullptr), nc(nullptr) {
+			connClosed(false), taskEnded(false), sendBuf(nullptr), recvBuf(nullptr), nc(nullptr) {
         }
 
         ~ConnectionHandler() {

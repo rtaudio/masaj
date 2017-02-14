@@ -252,7 +252,7 @@ bool JsonHttpServer::StreamResponse::write(const void *buf, int len) {
 		return false;
 	}
 
-	if (ch && ch->connectionClosed) {
+	if (ch && ch->connClosed) {
 		return false;
 	}
 
@@ -426,7 +426,7 @@ void JsonHttpServer::ev_handler(struct mg_connection *nc, int ev, void *ev_data)
                         catch (const std::exception &ex) {
 							LOG(logERROR) << "Streaming error:" << ex.what();
 						}
-						if(!ch->connectionClosed)
+						if(!ch->connClosed)
 							nc->flags |= MG_F_CLOSE_IMMEDIATELY; // stream connections always close
 						ch->notifyDone();
 					});
@@ -477,11 +477,10 @@ void JsonHttpServer::ev_handler(struct mg_connection *nc, int ev, void *ev_data)
 
 		if (ch) {
 			// notify thread that we are closing down & join
-			ch->connectionClosed = true; // this shuts down the StreamWriter
+			ch->connClosed = true; // this shuts down the StreamWriter
 			LOG(logDEBUG) << "Waiting for connection handler to stop...";
 			LOG(logDEBUG) << "\tHTTP message was:" << ch->lastRequest.substr(0, 30);
-            if( (nc->flags == 0) ) // & MG_F_CLOSE_IMMEDIATELY) != MG_F_CLOSE_IMMEDIATELY)
-                ch->blockUntilDone();
+            ch->blockUntilDone();
 			LOG(logDEBUG) << "\tDONE WAITING!";
 
 			// remove handler
@@ -530,7 +529,7 @@ void JsonHttpServer::ev_handler(struct mg_connection *nc, int ev, void *ev_data)
                 } catch (const std::exception &ex) {
                     LOG(logERROR) << "Streaming error:" << ex.what();
                 }
-                if(!ch->connectionClosed)
+                if(!ch->connClosed)
                     nc->flags |= MG_F_CLOSE_IMMEDIATELY; // stream connections always close
                 ch->notifyDone();
             });
@@ -560,7 +559,7 @@ void JsonHttpServer::ev_handler(struct mg_connection *nc, int ev, void *ev_data)
 
 bool JsonHttpServer::StreamResponse::isConnected() {
 	ConnectionHandler *ch = (ConnectionHandler *)(nc->user_data);
-	return  (ch && !ch->connectionClosed);
+	return  (ch && !ch->connClosed);
 }
 
 
@@ -590,7 +589,7 @@ bool JsonHttpServer::StreamResponse::isConnected() {
 
 void JsonHttpServer::ConnectionHandler::update(struct mg_connection *nc, struct http_message *hm) {
      this->nc = nc;
-     connectionClosed = false;
+     connClosed = false;
      lastRequest = std::string(hm->message.p, hm->message.len);
      uri = std::string(hm->uri.p, hm->uri.len);
      getVars = JsonNode(parseQuery(std::string(hm->query_string.p, hm->query_string.len)));
