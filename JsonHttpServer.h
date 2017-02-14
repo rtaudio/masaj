@@ -9,6 +9,8 @@
 //#include "concurrentqueue/blockingconcurrentqueue.h"
 #include "ThreadPool/ThreadPool.h"
 
+#include "../concurrentqueue/concurrentqueue.h"
+
 typedef std::map<std::string, std::string> StringMap;
 
 
@@ -22,10 +24,30 @@ struct mg_rpc_request;
 
 class JsonHttpServer
 {
+private:
+    struct ConnectionHandler;
+
 public:
 	//template <typename ReturnType>
 	//using RequestHandler = std::function<ReturnType(const NodeAddr &addr, const JsonObject &request)>;
 
+
+
+    class StreamRequest {
+    public:
+        const SocketAddress &addr;
+        const JsonNode &data;
+        const StringMap &headers;
+
+        std::string getHeader(std::string name) const;
+
+        StreamRequest(   const SocketAddress &addr, const JsonNode &queryVars,const  StringMap &headers)
+            : addr(addr), data(queryVars), headers(headers) {}
+
+        StreamRequest( const  ConnectionHandler *ch);
+    };
+
+    typedef StreamRequest WsRequest;
 
 	class StreamResponse {
 		friend class JsonHttpServer;
@@ -52,6 +74,10 @@ public:
 
 	public:
 		void addHeader(const std::string &name, const std::string &value);
+        inline void setContentType(const std::string &mime) {
+            addHeader("Content-Type", mime);
+        }
+
 		bool write(const void *buf, int len);	
 
 		void setSendBufferSize(int size) {
@@ -65,10 +91,34 @@ public:
 		bool isConnected();
 	};
 
+    class WsConnection {
+public:
+        WsConnection(ConnectionHandler *ch) : ch(ch) { }
+
+        // TODO bug: segfault
+        inline bool write(std::vector<uint8_t> &&data) {
+            if(ch->connectionClosed) return false;
+            return ch->sendBuf->enqueue(data); }
+
+        inline bool write(const std::vector<uint8_t> &data) {
+            if(ch->connectionClosed) return false;
+           return ch->sendBuf->enqueue(data); }
+
+        int tryRead(uint8_t *buf, int maxLen) {
+            return ch->recvBuf->try_dequeue_bulk(buf, maxLen);
+        }
+
+        inline bool isConnected() const { return !ch->connectionClosed; }
+
+    private:
+        ConnectionHandler *ch;
+    };
+
 	typedef std::function<void(const void *buf, int len)> Writer;
 
 	typedef std::function<void(const SocketAddress &addr, JsonNode &request, JsonNode &response)> RequestHandler;
-	typedef std::function<void(const SocketAddress &addr, JsonNode &request, StreamResponse &write)> StreamRequestHandler;
+    typedef std::function<void(const StreamRequest &request, StreamResponse &response)> StreamRequestHandler;
+    typedef std::function<void(const WsRequest &request, WsConnection &conn)> WebSocketHandler;
 
 	
 
@@ -77,7 +127,8 @@ public:
 	~JsonHttpServer();
 
 	void on(std::string rpcMethod, const RequestHandler &handler);
-	void onStream(std::string streamPrefix, const StreamRequestHandler &handler);
+    void onStream(std::string streamPrefix, const StreamRequestHandler &handler);
+    void onWS(std::string endpointUri, const WebSocketHandler &handler);
     
 	bool start(const std::string &bindAddr);
 	void update();
@@ -97,7 +148,7 @@ private:
 	clock_t lastRequestTime;
 
 	struct ConnectionHandler {
-		std::future<void> future;
+        struct mg_connection *nc;
 
 		ConnectionHandler(const ConnectionHandler&) = delete;
 		ConnectionHandler& operator=(const ConnectionHandler&) = delete;
@@ -106,7 +157,14 @@ private:
 
 		std::atomic<bool> connectionClosed;
 
-		std::string lastRequest;
+        std::string lastRequest; // TODO remove
+        std::string uri;
+        StringMap requestHeaders;
+        JsonNode getVars;
+
+        moodycamel::ConcurrentQueue<std::vector<uint8_t>> *sendBuf;
+        moodycamel::ConcurrentQueue<uint8_t> *recvBuf;
+
 
 		void notifyDone() {
 			done.notify_all();
@@ -117,12 +175,21 @@ private:
 			done.wait(lock);
 		}
 
-		void polled() {
-			//waitForPoll.Signal();
-		}
+        void poll();
 
-		ConnectionHandler() : connectionClosed(false) {			
-		}
+        void update(struct mg_connection *nc, struct http_message *hm);
+
+        ConnectionHandler() :
+            connectionClosed(false), sendBuf(nullptr), recvBuf(nullptr), nc(nullptr) {
+        }
+
+        ~ConnectionHandler() {
+            if(sendBuf)
+                delete sendBuf;
+            if(recvBuf)
+                delete recvBuf;
+        }
+
 	private:
 		std::condition_variable done;
 		std::mutex mtx;
@@ -137,6 +204,7 @@ private:
 	
 
 	std::map<std::string, RequestHandler> m_handlers;
-	std::map<std::string, StreamRequestHandler> m_streamHandlers;
+    std::map<std::string, StreamRequestHandler> m_streamHandlers;
+    std::map<std::string, WebSocketHandler> m_wsHandlers;
 };
 

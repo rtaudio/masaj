@@ -7,7 +7,6 @@
 #undef LOG
 #include "mongoose/mongoose.h"
 
-#include "SocketAddress.h"
 
 
 // need to override LOG() macro:
@@ -15,6 +14,9 @@
 #define LOG(level) if (level > pclog::Log::ReportingLevel()) ; else pclog::Log(level).get()
 #define logDebugHttp logDEBUG
 #include "pclog/pclog.h"
+
+#include "SocketAddress.h"
+
 
 JsonHttpClient::JsonHttpClient(int timeoutMs)
 {

@@ -1,6 +1,8 @@
 #pragma once
 
 
+
+
 #ifdef _WIN32
 	#define NOMINMAX
 	#include<winsock2.h>
@@ -18,6 +20,11 @@
 	//#define inet_aton(s,b) InetPton(AF_INET,L##s,b)
 	inline int close(SOCKET s) { return closesocket(s); }
 #else
+#include <stdio.h>
+#include <errno.h>
+#include <string.h>
+#include <locale.h>
+
 	#include<unistd.h>
 	#include <sys/types.h>
 	#include <sys/socket.h>
@@ -26,8 +33,12 @@
 	#include <netdb.h>
 	#include <arpa/inet.h>
 	#include <fcntl.h>
-	#include <string.h>
+        #ifndef SOCKET
+            #define SOCKET int
+        #endif
 #endif
+
+#include "pclog/pclog.h"
 
 
 inline int socketConnectTimeout(SOCKET &soc, uint64_t toUs)
@@ -75,12 +86,16 @@ inline bool socketSetBlocking(SOCKET &soc, bool block) {
 	const int flags = fcntl(soc, F_GETFL, 0);
 	int curNonBlock = (flags & O_NONBLOCK);
 	if (curNonBlock == !block) {
+#ifdef LOG
 		LOG(logDEBUG) << "Kernel blocking mode of socket already set to " << block;
+#endif
 		return true;
 	}
 
 	if (-1 == fcntl(soc, F_SETFL, block ? flags ^ O_NONBLOCK : flags | O_NONBLOCK)) {
+#ifdef LOG
 		LOG(logERROR) << "Cannot set socket kernel blocking to " << block << "!";
+#endif
 		return false;
 	}
 #else
@@ -102,8 +117,11 @@ inline std::string lastError(int err = 0)
 #if _WIN32
 	err = err ? err : WSAGetLastError();
 #else
+        char buf[300];
 	err = err ? err : errno;
-	return std::string(strerror(err));
+        if(strerror_r(err, buf, sizeof(buf)) == 0)
+            return std::string(buf);
+        return "[strerror_s failed!]";
 #endif
 
 	switch (err ? err : errno) {

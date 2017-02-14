@@ -1,7 +1,7 @@
 #include <string>
 #include <regex>
 #include <sstream>
-
+#include <algorithm>
 
 #include "net.h"
 #include "SocketAddress.h"
@@ -30,6 +30,11 @@
 JsonHttpServer::JsonHttpServer(int numWorkerThreads)
 	:threadPool(numWorkerThreads)
 {
+#ifndef _WIN32
+    // StreamResponse::write / send() can signal SIGPIPE, just ignore it
+    signal(SIGPIPE, SIG_IGN);
+#endif
+
 	m_mgEv = 0;
 	m_mgr = new mg_mgr();
 	mg_mgr_init(m_mgr, this);
@@ -58,6 +63,11 @@ void JsonHttpServer::update()
 	if (secondsSinceLastRequest > 2) {
 		mg_mgr_poll(m_mgr, 400);
 	}
+
+    // here we pump WebSocket data from handling threads to the client
+    for (ConnectionHandler *ch : activeConnectionHandlers) {
+       ch->poll();
+    }
 }
 
 bool JsonHttpServer::hasActiveConnection() {
@@ -72,6 +82,11 @@ void JsonHttpServer::on(std::string rpcMethod, const RequestHandler &handler)
 void JsonHttpServer::onStream(std::string streamPrefix, const StreamRequestHandler &handler)
 {
 	m_streamHandlers.insert(std::pair<std::string, StreamRequestHandler>(streamPrefix, handler));
+}
+
+void JsonHttpServer::onWS(std::string endpointUri, const WebSocketHandler &handler)
+{
+    m_wsHandlers.insert(std::pair<std::string, WebSocketHandler>("/" + endpointUri, handler));
 }
 
 
@@ -299,13 +314,14 @@ bool  JsonHttpServer::StreamResponse::sendHeaders() {
 		LOG(logERROR) << "failed to enable TCP_NODELAY! " << lastError();
 	}
 
+#if _WIN32
 	int send_buffer = 0;
 	int send_buffer_sizeof = sizeof(int);
 	result = setsockopt(nc->sock, SOL_SOCKET, SO_SNDBUF, (char*)&send_buffer, send_buffer_sizeof);
 	if (result < 0) {
 		LOG(logERROR) << "failed to set send buffer size! " << lastError();
 	}
-
+#endif
 
 	addHeader("Accept-Ranges", "none");
 	addHeader("Connection", "close");
@@ -315,7 +331,8 @@ bool  JsonHttpServer::StreamResponse::sendHeaders() {
 
 	std::string headerLines("HTTP/1.1 200 OK\r\n");
 
-	for (auto h : headers) {
+    // todo BUG: SEVFAULT HERE IN ITERATOR
+    for (auto h : headers) {
 		headerLines += h.first + ": " + h.second + "\r\n";
 	}
 
@@ -324,9 +341,28 @@ bool  JsonHttpServer::StreamResponse::sendHeaders() {
 	return write(headerLines);	
 }
 
+
+
+
+StringMap parseHeaders(const struct http_message *hm) {
+    StringMap headers;
+    for (int i = 0; i < MG_MAX_HTTP_HEADERS && hm->header_names[i].len > 0; i++) {
+      auto hn = std::string(hm->header_names[i].p, hm->header_names[i].len);
+      std::transform(hn.begin(), hn.end(), hn.begin(), ::tolower);
+      headers[hn] = std::string(hm->header_values[i].p, hm->header_values[i].len);
+    }
+    return headers;
+}
+
+
+static int is_websocket(const struct mg_connection *nc) {
+  return nc->flags & MG_F_IS_WEBSOCKET;
+}
+
 void JsonHttpServer::ev_handler(struct mg_connection *nc, int ev, void *ev_data)
 {
-	static const struct mg_str s_get_method = MG_MK_STR("GET");
+    static const struct mg_str s_get_method = MG_MK_STR("GET");
+    static const struct mg_str s_head_method = MG_MK_STR("HEAD");
 	static const struct mg_str s_post_method = MG_MK_STR("POST");
 	static const struct mg_str s_stream_query_prefix = MG_MK_STR("/streamd/");
 	static struct mg_serve_http_opts s_http_server_opts;
@@ -348,17 +384,16 @@ void JsonHttpServer::ev_handler(struct mg_connection *nc, int ev, void *ev_data)
 
 	switch (ev) {
 	case MG_EV_HTTP_REQUEST:
-		LOG(logDEBUG) << "MG_EV_HTTP_REQUEST " << nc << " on socket " << nc->sock;		
 
+        LOG(logDEBUG) << "HTTP_REQUEST " << nc << " on socket " << nc->sock << ": " << std::string(hm->message.p, hm->method.len + hm->uri.len + hm->proto.len);
 
 		if (ch != nullptr) {
-			LOG(logWARNING) << "MG_EV_HTTP_REQUEST for connection that is already handled, waiting...";
-			ch->polled();
+            LOG(logWARNING) << "HTTP_REQUEST for connection that is already handled, waiting...";
 			ch->blockUntilDone();
 		}
 
 		// for any GET request server static content
-		if (is_equal(&hm->method, &s_get_method))
+        if (is_equal(&hm->method, &s_get_method) || is_equal(&hm->method, &s_head_method))
 		{
 			// async stream handling
 			if (starts_with(&hm->uri, &s_stream_query_prefix))
@@ -375,29 +410,28 @@ void JsonHttpServer::ev_handler(struct mg_connection *nc, int ev, void *ev_data)
 						jhs->activeConnectionHandlers.push_back(ch);
 					}
 
-					ch->connectionClosed = false;
-					ch->lastRequest = std::string(hm->message.p, hm->message.len);
+                    ch->update(nc, hm);
 
 					auto f = streamHandler->second;
-					auto queryString = std::string(hm->query_string.p, hm->query_string.len);
 
+                    {
+                    jhs->threadPool.enqueue([jhs, nc, f]() {
+                        auto ch = (ConnectionHandler*)nc->user_data;
+						try {                            
 
-
-
-					ch->future = jhs->threadPool.enqueue([queryString, jhs, nc, f, ch]() {
-						try {
-
-							auto args = JsonNode(parseQuery(queryString));
-							StreamResponse response(jhs, nc);
-							f(*(SocketAddress*)&nc->sa, args, response);
+                            StreamRequest request(ch);
+                            StreamResponse response(jhs, nc);
+                            f(request, response);
 						}
-						catch (std::exception &ex) {
+                        catch (const std::exception &ex) {
 							LOG(logERROR) << "Streaming error:" << ex.what();
 						}
 						if(!ch->connectionClosed)
 							nc->flags |= MG_F_CLOSE_IMMEDIATELY; // stream connections always close
 						ch->notifyDone();
 					});
+                }
+                    LOG(logDEBUG) << "HTTP Streaming task queued!";
 					return; // end handle streams
 				}
 			}
@@ -417,18 +451,37 @@ void JsonHttpServer::ev_handler(struct mg_connection *nc, int ev, void *ev_data)
 		mg_http_send_error(nc, 501, NULL);
 		return; // ignore any other requests
 
+    case MG_EV_WEBSOCKET_HANDSHAKE_REQUEST: {
+        if (ch != nullptr) {
+            LOG(logWARNING) << "HTTP_REQUEST for connection that is already handled, waiting...";
+            ch->blockUntilDone();
+        }
+
+        if (ch == nullptr) {
+            nc->user_data = ch = new ConnectionHandler();
+            jhs->activeConnectionHandlers.push_back(ch);
+        }
+        ch->update(nc, hm);
+    }break;
+
+
+
+
 	case MG_EV_CLOSE:
 		LOG(logDEBUG) << "MG_EV_CLOSE " << nc;
 		//printf("MG_EV_CLOSE (%p)\n", nc);
 
-		if (ch) {
+        if (is_websocket(nc)) {
+            LOG(logDEBUG)    << "Websocket closed!";
+        }
 
+		if (ch) {
 			// notify thread that we are closing down & join
 			ch->connectionClosed = true; // this shuts down the StreamWriter
 			LOG(logDEBUG) << "Waiting for connection handler to stop...";
 			LOG(logDEBUG) << "\tHTTP message was:" << ch->lastRequest.substr(0, 30);
-			ch->polled();
-			ch->blockUntilDone();
+            if( (nc->flags == 0) ) // & MG_F_CLOSE_IMMEDIATELY) != MG_F_CLOSE_IMMEDIATELY)
+                ch->blockUntilDone();
 			LOG(logDEBUG) << "\tDONE WAITING!";
 
 			// remove handler
@@ -443,12 +496,65 @@ void JsonHttpServer::ev_handler(struct mg_connection *nc, int ev, void *ev_data)
 			delete ch;
 		}
 		return;
-	}
 
-	if (nc && nc->user_data) {
-		//LOG(logWARNING) << "Polling connectio handler";
-		((ConnectionHandler*)nc->user_data)->polled();
-	}
+
+     {
+        if (ch != nullptr) {
+            LOG(logWARNING) << "MG_EV_HTTP_REQUEST for connection that is already handled, waiting...";
+            ch->blockUntilDone();
+        }
+
+        LOG(logDEBUG) << "MG_EV_WEBSOCKET_HANDSHAKE_REQUEST";
+
+    }break;
+
+    case MG_EV_WEBSOCKET_HANDSHAKE_DONE: {
+
+        auto wsEndpoint = ch->uri;
+        LOG(logDebugHttp) << "incoming websocket request " << wsEndpoint;
+
+        auto handler = jhs->m_wsHandlers.find(wsEndpoint);
+        if (handler != jhs->m_wsHandlers.end()) {
+            auto f = handler->second;
+
+            {
+            jhs->threadPool.enqueue([jhs, nc, f]() {
+                auto ch = (ConnectionHandler*)nc->user_data;
+                ch->sendBuf = new moodycamel::ConcurrentQueue<std::vector<uint8_t>>;
+                ch->recvBuf = new moodycamel::ConcurrentQueue<uint8_t>;
+
+                try {
+                    WsConnection conn(ch);
+                    WsRequest request(ch);
+                    f(request, conn);
+                } catch (const std::exception &ex) {
+                    LOG(logERROR) << "Streaming error:" << ex.what();
+                }
+                if(!ch->connectionClosed)
+                    nc->flags |= MG_F_CLOSE_IMMEDIATELY; // stream connections always close
+                ch->notifyDone();
+            });
+        }
+            LOG(logDEBUG) << "HTTP Streaming task queued!";
+            return; // end handle streams
+        } else {
+            nc->flags |= MG_F_CLOSE_IMMEDIATELY;
+        }
+
+          break;
+        }
+        case MG_EV_WEBSOCKET_FRAME: {
+          struct websocket_message *wm = (struct websocket_message *) ev_data;
+          if(ch) {
+              if(!ch->recvBuf) {
+                  LOG(logERROR) << "MG_EV_WEBSOCKET_FRAME for connection with handler which has no buffers!";
+                  return;
+              }
+              ch->recvBuf->enqueue_bulk((uint8_t*)wm->data, wm->size);
+          }
+          break;
+        }
+    }
 }
 
 
@@ -456,3 +562,41 @@ bool JsonHttpServer::StreamResponse::isConnected() {
 	ConnectionHandler *ch = (ConnectionHandler *)(nc->user_data);
 	return  (ch && !ch->connectionClosed);
 }
+
+
+ std::string JsonHttpServer::StreamRequest::getHeader(std::string name) const
+ {
+         std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+         auto it = headers.find(name);
+         if(it == headers.end()) {
+             return "";
+         }
+         return it->second;
+ }
+
+
+ void JsonHttpServer::ConnectionHandler::poll() {
+
+     // here we pump our send buffer
+     if(sendBuf) {
+        std::vector<uint8_t> frame;
+        while(sendBuf->try_dequeue(frame))
+        {
+             mg_send_websocket_frame(this->nc, WEBSOCKET_OP_BINARY, frame.data(), frame.size());
+        }
+     }
+
+ }
+
+void JsonHttpServer::ConnectionHandler::update(struct mg_connection *nc, struct http_message *hm) {
+     this->nc = nc;
+     connectionClosed = false;
+     lastRequest = std::string(hm->message.p, hm->message.len);
+     uri = std::string(hm->uri.p, hm->uri.len);
+     getVars = JsonNode(parseQuery(std::string(hm->query_string.p, hm->query_string.len)));
+     requestHeaders = parseHeaders(hm);
+ }
+
+
+JsonHttpServer::StreamRequest::StreamRequest( const  ConnectionHandler *ch)
+    : addr(*(SocketAddress*)&ch->nc->sa), data(ch->getVars), headers(ch->requestHeaders) {}
