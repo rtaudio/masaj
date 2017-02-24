@@ -125,20 +125,22 @@ inline std::string lastError(int err = 0)
 #endif
 
 	switch (err ? err : errno) {
-	case EADDRINUSE: return("EADDRINUSE\n"); break;
-	case EADDRNOTAVAIL: return("EADDRNOTAVAIL\n"); break;
-	case EBADF: return("EBADF\n"); break;
-	case ECONNABORTED: return("ECONNABORTED\n"); break;
-	case EINVAL: return("EINVAL\n"); break;
+	case EADDRINUSE: return("EADDRINUSE\n");
+	case EADDRNOTAVAIL: return("EADDRNOTAVAIL\n");
+	case EBADF: return("EBADF\n");
+	case ECONNABORTED: return("ECONNABORTED\n");
+	case EINVAL: return("EINVAL\n");
 		//case EIO: return("EIO\n"); break;
-	case ENOBUFS: return("ENOBUFS\n"); break;
-	case ENOPROTOOPT: return("ENOPROTOOPT\n"); break;
-	case ENOTCONN: return("ENOTCONN\n"); break;
-	case ENOTSOCK: return("ENOTSOCK\n"); break;
-	case EPERM: return("EPERM\n"); break;
+	case ENOBUFS: return("ENOBUFS\n");
+	case ENOPROTOOPT: return("ENOPROTOOPT\n");
+	case ENOTCONN: return("ENOTCONN\n");
+	case ENOTSOCK: return("ENOTSOCK\n");
+	case EPERM: return("EPERM\n");
 
 #ifdef _WIN32
 	case WSAEADDRNOTAVAIL: return "WSAEADDRNOTAVAIL"; break;
+	case WSAEWOULDBLOCK:
+		return "WSAEWOULDBLOCK";
 #endif
 
 #ifdef ETOOMANYREFS
@@ -150,36 +152,20 @@ inline std::string lastError(int err = 0)
 	default:
 #ifdef _WIN32
 		LPVOID lpMsgBuf;
-		LPVOID lpDisplayBuf;
 		DWORD dw = GetLastError();
 
 		FormatMessage(
-			FORMAT_MESSAGE_ALLOCATE_BUFFER |
-			FORMAT_MESSAGE_FROM_SYSTEM |
-			FORMAT_MESSAGE_IGNORE_INSERTS,
-			NULL,
-			dw,
-			MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-			(LPTSTR)&lpMsgBuf,
-			0, NULL);
+			FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |	FORMAT_MESSAGE_IGNORE_INSERTS,
+			NULL, dw, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPTSTR)&lpMsgBuf, 0, NULL
+		);
 
-		// Display the error message and exit the process
 
-		lpDisplayBuf = (LPVOID)LocalAlloc(LMEM_ZEROINIT,
-			(lstrlen((LPCTSTR)lpMsgBuf) + 40) * sizeof(TCHAR));
-		StringCchPrintf((LPTSTR)lpDisplayBuf,
-			LocalSize(lpDisplayBuf) / sizeof(TCHAR),
-			TEXT("%s failed with error %d: %s"),
-			"[]", dw, lpMsgBuf);
-
-		std::wstring  msg((wchar_t*)lpDisplayBuf);
+		std::string msg((LPTSTR)lpMsgBuf);
 		LocalFree(lpMsgBuf);
-		LocalFree(lpDisplayBuf);
 
-		//setup converter
-		typedef std::codecvt_utf8<wchar_t> convert_type;
-		std::wstring_convert<convert_type, wchar_t> converter;
-		return converter.to_bytes(msg);
+		msg += " (" + std::to_string(dw) + ")";
+
+		return msg;
 #endif
 
 

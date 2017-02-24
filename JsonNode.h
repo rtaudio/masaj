@@ -25,6 +25,14 @@ struct JsonNode {
 	std::string str;
 	double num;
 
+	inline double asNum() const {
+		switch (t) {
+		case Type::Number: return num;
+		case Type::String: return std::stod(str);
+		default: throw std::invalid_argument("invalid JsonNode::asNum()");
+		}
+	}
+
 	inline void clear() {
 		t = Type::Undefined;
 		obj.clear();
@@ -84,6 +92,19 @@ struct JsonNode {
 		return val;
 	}
 
+
+	// implicit number conversion
+	template<typename T, typename = typename std::enable_if<std::is_arithmetic<T>::value, T>::type>
+	inline operator T() const { 
+		if (t != Type::Number) throw std::domain_error("JsonNode has is not a number");
+		return (T)num;
+	}
+
+	// implicit string conversion
+	inline operator std::string() const {
+		if (t != Type::String) throw std::domain_error("JsonNode has is not a string");
+		return str;
+	}
 
 
 	friend std::ostream& operator<< (std::ostream& stream, const JsonNode& jd);

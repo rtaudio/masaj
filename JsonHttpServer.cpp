@@ -186,8 +186,15 @@ void  JsonHttpServer::rpc_dispatch(struct mg_connection *nc, struct http_message
 	}
 
 	//LOG(logDEBUG1) << "rpc_dispatch: " << method;
-	auto f = hit->second;
-	f(*nodeAddr, requestNode["params"], response["result"]);
+	try {
+		auto f = hit->second;
+		f(*nodeAddr, requestNode["params"], response["result"]);
+	}
+	catch (const std::exception &ex) {
+		LOG(logERROR) << "error in RPC handler " << method << ": " << ex.what();
+		rpcReponse(nc, rpcErrorReponse(response, ex.what()));
+		return;
+	}
 
 	//LOG(logDEBUG2) << "sending response: " << response;
 
